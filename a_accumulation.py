@@ -401,6 +401,7 @@ def section6_interactive(eng, by_country: pd.DataFrame):
 
     m.save(str(OUTPUT / "a_choropleth.html"))
     print("  → a_choropleth.html  (bubble map — radius ∝ √TSI)")
+    
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
