@@ -61,10 +61,13 @@ NODATA_THRESHOLD = -1e30
 
 RASTERS = {
     "RP10":  "/home/carina/Downloads/floodMap_RP010/floodmap_EFAS_RP010_C.tif",
+    "RP20":  "/home/carina/Downloads/floodMap_RP020/floodmap_EFAS_RP020_C.tif",
+    "RP50":  "/home/carina/Downloads/floodMap_RP050/floodmap_EFAS_RP050_C.tif",
     "RP100": "/home/carina/Downloads/floodMap_RP100/floodmap_EFAS_RP100_C.tif",
+    "RP200": "/home/carina/Downloads/floodMap_RP200/floodmap_EFAS_RP200_C.tif",
     "RP500": "/home/carina/Downloads/floodMap_RP500/floodmap_EFAS_RP500_C.tif",
 }
-RETURN_PERIODS = {"RP10": 10, "RP100": 100, "RP500": 500}
+RETURN_PERIODS = {"RP10": 10, "RP20": 20, "RP50": 50, "RP100": 100, "RP200": 200, "RP500": 500}
 
 # Huizinga et al. (2017) European residential depth-damage curve
 _CURVE_DEPTHS   = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -155,23 +158,25 @@ def section4_metrics(df: pd.DataFrame) -> pd.DataFrame:
         ))
 
     summary = pd.DataFrame(rows)
-    L = summary["gross_loss_bn"].values * 1e9   # [L10, L100, L500]
-    r = summary["annual_rate"].values            # [0.1, 0.01, 0.002]
+    L = summary["gross_loss_bn"].values * 1e9
+    r = summary["annual_rate"].values
 
     # Trapezoidal integration over OEP curve
-    aal = (
-        0.5 * L[0] * (1.0 - r[0])               # ramp from rate=1.0 (loss=0) to RP10
-        + 0.5 * (L[0] + L[1]) * (r[0] - r[1])  # RP10 → RP100
-        + 0.5 * (L[1] + L[2]) * (r[1] - r[2])  # RP100 → RP500
-        + L[2] * r[2]                            # tail beyond RP500 (held constant)
-    )
+    # First segment: ramp from loss=0 at rate=1.0 down to first RP
+    aal = 0.5 * L[0] * (1.0 - r[0])
+    # Middle segments
+    for i in range(len(L) - 1):
+        aal += 0.5 * (L[i] + L[i + 1]) * (r[i] - r[i + 1])
+    # Tail beyond last RP: held constant at L[-1]
+    aal += L[-1] * r[-1]
 
     print(f"\n  Gross TSI          : {tsi_total/1e9:.1f} B EUR")
     for _, row in summary.iterrows():
         print(f"  {row.return_period} gross loss : {row.gross_loss_bn:6.2f} B EUR  "
               f"({row.loss_ratio_pct:.3f}% of TSI)")
     print(f"\n  AAL (trapezoidal)  : {aal/1e9:.4f} B EUR  ({aal/tsi_total*100:.5f}% of TSI)")
-    print(f"  AAL / RP100 ratio  : {aal/L[1]*100:.1f}%  "
+    l_rp100 = summary.loc[summary["return_period"] == "RP100", "gross_loss_bn"].iloc[0] * 1e9
+    print(f"  AAL / RP100 ratio  : {aal/l_rp100*100:.1f}%  "
           f"(>20% suggests heavy left tail; <5% suggests sparse RP10 losses)")
 
     aal_row = pd.DataFrame([dict(

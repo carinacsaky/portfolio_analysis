@@ -58,7 +58,10 @@ NODATA_THRESHOLD = -1e30   # anything below this is nodata
 # Add RP100 and RP500 paths here when downloaded
 RASTERS = {
     "RP10":  "/home/carina/Downloads/floodMap_RP010/floodmap_EFAS_RP010_C.tif",
+    "RP20":  "/home/carina/Downloads/floodMap_RP020/floodmap_EFAS_RP020_C.tif",
+    "RP50":  "/home/carina/Downloads/floodMap_RP050/floodmap_EFAS_RP050_C.tif",
     "RP100": "/home/carina/Downloads/floodMap_RP100/floodmap_EFAS_RP100_C.tif",
+    "RP200": "/home/carina/Downloads/floodMap_RP200/floodmap_EFAS_RP200_C.tif",
     "RP500": "/home/carina/Downloads/floodMap_RP500/floodmap_EFAS_RP500_C.tif",
 }
 
