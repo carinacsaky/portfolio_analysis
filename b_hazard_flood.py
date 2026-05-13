@@ -84,8 +84,6 @@ def section1_load(eng) -> pd.DataFrame:
     return df
 
 
-# ── Section 2: reproject and sample rasters ───────────────────────────────────
-
 def section2_sample(df: pd.DataFrame) -> pd.DataFrame:
     print(f"\n── Section 2: Raster Sampling ──────────────────────────────────")
 
@@ -161,20 +159,41 @@ def section3_exposure(df: pd.DataFrame) -> pd.DataFrame:
 def section4_plots(df: pd.DataFrame, summary: pd.DataFrame):
     print("\n── Section 4: Plots ────────────────────────────────────────────")
 
-    # 4a: % TSI flooded per return period
+    # 4a: stacked bar — % TSI by depth band per return period
+    bands       = ["0–0.5m", "0.5–1m", "1–2m", "2–5m", ">5m"]
+    band_colors = ["#a8d5f5", "#4da6e8", "#1a6faf", "#0d3b6e", "#06213d"]
+    bins        = [0, 0.5, 1, 2, 5, np.inf]
+    tsi_total   = df["tsi"].sum()
+    rps         = list(RASTERS.keys())
+
+    # Build band_pct[band][rp] = % of total TSI
+    band_pct = {b: [] for b in bands}
+    for rp_label in rps:
+        flooded_mask = df[f"flooded_{rp_label}"]
+        depth        = df.loc[flooded_mask, f"depth_{rp_label}"]
+        cut          = pd.cut(depth, bins=bins, labels=bands)
+        band_tsi     = df.loc[flooded_mask].groupby(cut, observed=True)["tsi"].sum()
+        for b in bands:
+            band_pct[b].append(band_tsi.get(b, 0) / tsi_total * 100)
+
     fig, ax = plt.subplots(figsize=(8, 5))
-    rps   = summary["return_period"].values
-    pcts  = summary["pct_tsi_flooded"].values
-    bars  = ax.bar(rps, pcts, color="#4472C4", width=0.4, alpha=0.85)
-    for bar, pct, tsi in zip(bars, pcts, summary["tsi_flooded_bn"].values):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.2,
-                f"{pct:.1f}%\n({tsi:.0f} B EUR)",
-                ha="center", va="bottom", fontsize=10)
+    bottoms = np.zeros(len(rps))
+    for b, color in zip(bands, band_colors):
+        vals = np.array(band_pct[b])
+        ax.bar(rps, vals, bottom=bottoms, color=color, width=0.4, alpha=0.9, label=b)
+        bottoms += vals
+
+    # Total label above each bar
+    for i, (total_pct, tsi_bn) in enumerate(
+            zip(summary["pct_tsi_flooded"].values, summary["tsi_flooded_bn"].values)):
+        ax.text(i, bottoms[i] + 0.1, f"{total_pct:.1f}%\n({tsi_bn:.0f} B EUR)",
+                ha="center", va="bottom", fontsize=9)
+
     ax.set_ylabel("% of total gross TSI in floodplain")
     ax.set_xlabel("Return period")
-    ax.set_title(f"{COUNTRY} — {PERIL}: TSI in floodplain by return period")
-    ax.set_ylim(0, max(pcts) * 1.3)
+    ax.set_title(f"{COUNTRY} — {PERIL}: TSI in floodplain by return period and depth")
+    ax.set_ylim(0, max(summary["pct_tsi_flooded"].values) * 1.4)
+    ax.legend(title="Flood depth", fontsize=8, loc="upper left")
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     fig.savefig(OUTPUT / "b_flood_exposure.png", dpi=150, bbox_inches="tight")
