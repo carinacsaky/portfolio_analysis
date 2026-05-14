@@ -22,7 +22,8 @@ AAL:
 
 Outputs (output/):
   c_loss_summary.csv    — loss and loss ratio by return period, plus AAL
-  c_oep_curve.png       — Occurrence Exceedance Probability curve
+  c_top_cells.csv       — top 20 H3 res-7 cells by RP100 gross loss
+  c_oep_curve.png       — Occurrence Exceedance Probability curve (gross and net)
   c_depth_damage.png    — damage curve used (methodology reference)
   c_loss_map.png        — location-level estimated gross loss at RP100
 """
@@ -31,6 +32,7 @@ import os
 import warnings
 from pathlib import Path
 
+import h3
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -87,13 +89,14 @@ def make_engine():
 def section1_load(eng) -> pd.DataFrame:
     print(f"\n── Section 1: Load {COUNTRY} / {PERIL} ────────────────────────────")
     sql = text(f"""
-        SELECT lat, lng, insured_value_gross AS tsi
+        SELECT lat, lng, insured_value_gross AS tsi, insured_value_net AS tsi_net
         FROM "{PARTITION}"
         WHERE country = :c AND covered_peril = :p
     """)
     print("  Querying … ", end="", flush=True)
     df = pd.read_sql(sql, eng, params={"c": COUNTRY, "p": PERIL})
-    print(f"{len(df):,} rows  |  TSI {df['tsi'].sum()/1e9:.1f} B EUR")
+    print(f"{len(df):,} rows  |  Gross TSI {df['tsi'].sum()/1e9:.1f} B EUR  "
+          f"| Net TSI {df['tsi_net'].sum()/1e9:.1f} B EUR")
     return df
 
 
@@ -128,13 +131,14 @@ def section3_losses(df: pd.DataFrame) -> pd.DataFrame:
         dmg   = damage_factor(depth)
         loss  = df["tsi"].values * dmg
         df[f"dmg_factor_{rp_label}"] = dmg
-        df[f"loss_{rp_label}"]       = loss
+        df[f"loss_{rp_label}"]      = loss
+        df[f"loss_net_{rp_label}"]  = df["tsi_net"].values * dmg
 
         flooded = depth > 0
         if flooded.any():
-            print(f"  {rp_label}:  gross loss {loss.sum()/1e9:.2f} B EUR  "
-                  f"| mean damage factor on flooded locs: {dmg[flooded].mean()*100:.1f}%  "
-                  f"| max: {dmg[flooded].max()*100:.1f}%")
+            print(f"  {rp_label}:  gross {loss.sum()/1e9:.2f} B EUR  "
+                  f"| net {df[f'loss_net_{rp_label}'].sum()/1e9:.2f} B EUR  "
+                  f"| mean dmg factor: {dmg[flooded].mean()*100:.1f}%")
 
     return df
 
@@ -144,81 +148,133 @@ def section3_losses(df: pd.DataFrame) -> pd.DataFrame:
 def section4_metrics(df: pd.DataFrame) -> pd.DataFrame:
     print(f"\n── Section 4: Portfolio Metrics and AAL ────────────────────────")
 
-    tsi_total = df["tsi"].sum()
+    tsi_gross = df["tsi"].sum()
+    tsi_net   = df["tsi_net"].sum()
 
     rows = []
     for rp_label, rp_val in RETURN_PERIODS.items():
-        loss = df[f"loss_{rp_label}"].sum()
+        gross = df[f"loss_{rp_label}"].sum()
+        net   = df[f"loss_net_{rp_label}"].sum()
         rows.append(dict(
             return_period=rp_label,
             rp_years=rp_val,
             annual_rate=1 / rp_val,
-            gross_loss_bn=loss / 1e9,
-            loss_ratio_pct=loss / tsi_total * 100,
+            gross_loss_bn=gross / 1e9,
+            gross_lr_pct=gross / tsi_gross * 100,
+            net_loss_bn=net / 1e9,
+            net_lr_pct=net / tsi_net * 100,
         ))
 
     summary = pd.DataFrame(rows)
-    L = summary["gross_loss_bn"].values * 1e9
     r = summary["annual_rate"].values
 
-    # Trapezoidal integration over OEP curve
-    # First segment: ramp from loss=0 at rate=1.0 down to first RP
-    aal = 0.5 * L[0] * (1.0 - r[0])
-    # Middle segments
-    for i in range(len(L) - 1):
-        aal += 0.5 * (L[i] + L[i + 1]) * (r[i] - r[i + 1])
-    # Tail beyond last RP: held constant at L[-1]
-    aal += L[-1] * r[-1]
+    def trapz_aal(losses):
+        aal = 0.5 * losses[0] * (1.0 - r[0])
+        for i in range(len(losses) - 1):
+            aal += 0.5 * (losses[i] + losses[i + 1]) * (r[i] - r[i + 1])
+        aal += losses[-1] * r[-1]
+        return aal
 
-    print(f"\n  Gross TSI          : {tsi_total/1e9:.1f} B EUR")
+    Lg = summary["gross_loss_bn"].values * 1e9
+    Ln = summary["net_loss_bn"].values * 1e9
+    aal_gross = trapz_aal(Lg)
+    aal_net   = trapz_aal(Ln)
+
+    print(f"\n  Gross TSI : {tsi_gross/1e9:.1f} B EUR  |  Net TSI : {tsi_net/1e9:.1f} B EUR  "
+          f"(net/gross ratio: {tsi_net/tsi_gross*100:.1f}%)")
+    print(f"\n  {'RP':<8} {'Gross loss':>12}  {'Gross LR':>9}  {'Net loss':>10}  {'Net LR':>8}  {'Ceded':>10}")
     for _, row in summary.iterrows():
-        print(f"  {row.return_period} gross loss : {row.gross_loss_bn:6.2f} B EUR  "
-              f"({row.loss_ratio_pct:.3f}% of TSI)")
-    print(f"\n  AAL (trapezoidal)  : {aal/1e9:.4f} B EUR  ({aal/tsi_total*100:.5f}% of TSI)")
-    l_rp100 = summary.loc[summary["return_period"] == "RP100", "gross_loss_bn"].iloc[0] * 1e9
-    print(f"  AAL / RP100 ratio  : {aal/l_rp100*100:.1f}%  "
-          f"(>20% suggests heavy left tail; <5% suggests sparse RP10 losses)")
+        ceded = row.gross_loss_bn - row.net_loss_bn
+        print(f"  {row.return_period:<8} {row.gross_loss_bn:>10.2f} B  "
+              f"{row.gross_lr_pct:>8.3f}%  {row.net_loss_bn:>8.2f} B  "
+              f"{row.net_lr_pct:>7.3f}%  {ceded:>8.2f} B")
+    print(f"\n  Gross AAL : {aal_gross/1e9:.4f} B EUR  ({aal_gross/tsi_gross*100:.5f}% of gross TSI)")
+    print(f"  Net AAL   : {aal_net/1e9:.4f} B EUR  ({aal_net/tsi_net*100:.5f}% of net TSI)")
+    print(f"  Ceded AAL : {(aal_gross-aal_net)/1e9:.4f} B EUR  "
+          f"(reinsurance covers {(aal_gross-aal_net)/aal_gross*100:.1f}% of gross AAL)")
 
     aal_row = pd.DataFrame([dict(
         return_period="AAL", rp_years=np.nan, annual_rate=np.nan,
-        gross_loss_bn=aal / 1e9, loss_ratio_pct=aal / tsi_total * 100,
+        gross_loss_bn=aal_gross / 1e9, gross_lr_pct=aal_gross / tsi_gross * 100,
+        net_loss_bn=aal_net / 1e9, net_lr_pct=aal_net / tsi_net * 100,
     )])
     summary = pd.concat([summary, aal_row], ignore_index=True)
     summary.to_csv(OUTPUT / "c_loss_summary.csv", index=False)
     print("\n  → c_loss_summary.csv")
 
+    # Top 20 H3 cells by RP100 gross loss (res 7 ≈ 2.3 km, matches U1/U4)
+    print(f"\n── Section 4b: Top 20 H3 Cells (res 7) by RP100 Gross Loss ────")
+    df["h3_7"] = [h3.latlng_to_cell(la, lo, 7)
+                  for la, lo in zip(df["lat"].values, df["lng"].values)]
+    cell_loss = (df[df["loss_RP100"] > 0]
+                 .groupby("h3_7")
+                 .agg(
+                     n_locations=("tsi", "count"),
+                     tsi_M=("tsi", lambda x: x.sum() / 1e6),
+                     loss_M=("loss_RP100", lambda x: x.sum() / 1e6),
+                     loss_net_M=("loss_net_RP100", lambda x: x.sum() / 1e6),
+                     mean_depth=("depth_RP100", "mean"),
+                 )
+                 .reset_index())
+    cell_loss["lat"] = cell_loss["h3_7"].map(lambda c: h3.cell_to_latlng(c)[0])
+    cell_loss["lng"] = cell_loss["h3_7"].map(lambda c: h3.cell_to_latlng(c)[1])
+    cell_loss["lr_pct"] = cell_loss["loss_M"] / cell_loss["tsi_M"] * 100
+    top20_cells = cell_loss.nlargest(20, "loss_M").reset_index(drop=True)
+    top20_cells.index = range(1, 21)
+
+    print(f"\n  {'#':>3}  {'Lat':>8}  {'Lng':>8}  {'Locs':>6}  {'TSI (M)':>8}  "
+          f"{'Depth (m)':>9}  {'LR%':>6}  {'Gross loss (M)':>14}  {'Net loss (M)':>12}")
+    for i, r in top20_cells.iterrows():
+        print(f"  {i:>3}  {r.lat:>8.4f}  {r.lng:>8.4f}  {int(r.n_locations):>6}  "
+              f"{r.tsi_M:>8.1f}  {r.mean_depth:>9.2f}  {r.lr_pct:>6.1f}  "
+              f"{r.loss_M:>14.1f}  {r.loss_net_M:>12.1f}")
+
+    top20_cells[["lat", "lng", "n_locations", "tsi_M", "mean_depth",
+                 "lr_pct", "loss_M", "loss_net_M"]].to_csv(
+        OUTPUT / "c_top_cells.csv", index_label="rank")
+    print("\n  → c_top_cells.csv")
+
     return summary
 
-
-# ── Section 5: plots ──────────────────────────────────────────────────────────
 
 def section5_plots(df: pd.DataFrame, summary: pd.DataFrame):
     print("\n── Section 5: Plots ────────────────────────────────────────────")
 
-    oep = summary[summary["return_period"] != "AAL"].copy()
-    aal_bn = summary.loc[summary["return_period"] == "AAL", "gross_loss_bn"].iloc[0]
+    oep     = summary[summary["return_period"] != "AAL"].copy()
+    aal_g   = summary.loc[summary["return_period"] == "AAL", "gross_loss_bn"].iloc[0]
+    aal_n   = summary.loc[summary["return_period"] == "AAL", "net_loss_bn"].iloc[0]
 
-    # 5a: OEP curve
-    fig, ax = plt.subplots(figsize=(9, 5))
-    rp_years = oep["rp_years"].values
-    losses   = oep["gross_loss_bn"].values
+    # 5a: OEP curve — gross and net
+    fig, ax = plt.subplots(figsize=(10, 5))
+    rp_years  = oep["rp_years"].values
+    losses_g  = oep["gross_loss_bn"].values
+    losses_n  = oep["net_loss_bn"].values
 
-    ax.fill_between([1, *rp_years, 2000], [0, *losses, losses[-1]],
-                    alpha=0.08, color="#1a6faf", step=None)
-    ax.plot(rp_years, losses, "o-", color="#1a6faf", lw=2, ms=8, zorder=3)
-    for rp, loss, lr in zip(rp_years, losses, oep["loss_ratio_pct"].values):
-        ax.annotate(f"{loss:.2f} B EUR\n({lr:.2f}% LR)",
-                    xy=(rp, loss), xytext=(12, 4),
-                    textcoords="offset points", fontsize=8.5)
+    # Ceded shading between gross and net
+    ax.fill_between([1, *rp_years, 2000],
+                    [0, *losses_n, losses_n[-1]],
+                    [0, *losses_g, losses_g[-1]],
+                    alpha=0.12, color="#C00000", label="Ceded (reinsurance)")
+    ax.fill_between([1, *rp_years, 2000], [0, *losses_n, losses_n[-1]],
+                    alpha=0.10, color="#1a6faf")
 
-    ax.axhline(aal_bn, color="#ED7D31", lw=1.5, linestyle="--",
-               label=f"AAL = {aal_bn:.4f} B EUR")
+    ax.plot(rp_years, losses_g, "o-", color="#1a6faf", lw=2, ms=7, zorder=3,
+            label=f"Gross OEP (AAL = {aal_g:.2f} B EUR)")
+    ax.plot(rp_years, losses_n, "s--", color="#C00000", lw=2, ms=7, zorder=3,
+            label=f"Net OEP   (AAL = {aal_n:.2f} B EUR)")
+
+    for rp, lg, ln in zip(rp_years, losses_g, losses_n):
+        ax.annotate(f"{lg:.1f}", xy=(rp, lg), xytext=(0, 6),
+                    textcoords="offset points", ha="center", fontsize=7.5, color="#1a6faf")
+        ax.annotate(f"{ln:.1f}", xy=(rp, ln), xytext=(0, -13),
+                    textcoords="offset points", ha="center", fontsize=7.5, color="#C00000")
+
     ax.set_xscale("log")
     ax.set_xticks(rp_years)
     ax.set_xticklabels([str(int(r)) for r in rp_years])
     ax.set_xlabel("Return period (years)")
-    ax.set_ylabel("Gross loss (B EUR)")
-    ax.set_title(f"{COUNTRY} — {PERIL}: Occurrence Exceedance Probability curve")
+    ax.set_ylabel("Loss (B EUR)")
+    ax.set_title(f"{COUNTRY} — {PERIL}: Gross vs Net OEP curve")
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3)
     plt.tight_layout()
