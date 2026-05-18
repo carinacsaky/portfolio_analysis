@@ -197,11 +197,11 @@ def section3(eng):
 
     n_q2, n_q4 = len(q2_keys), len(q4_keys)
     print(f"\n  Flow (unique lat/lng/peril triplets):")
-    print(f"    Q2 unique : {n_q2:>10,}")
-    print(f"    Q4 unique : {n_q4:>10,}")
-    print(f"    Persisted : {len(persisted):>10,}  ({len(persisted)/n_q2*100:.1f}% of Q2)")
-    print(f"    Dropped   : {len(dropped):>10,}  ({len(dropped)/n_q2*100:.1f}% of Q2)")
-    print(f"    New       : {len(new):>10,}  ({len(new)/n_q4*100:.1f}% of Q4)")
+    print(f"    {LABEL_Q2} unique : {n_q2:>10,}")
+    print(f"    {LABEL_Q4} unique : {n_q4:>10,}")
+    print(f"    Persisted       : {len(persisted):>10,}  ({len(persisted)/n_q2*100:.1f}% of {LABEL_Q2})")
+    print(f"    Dropped         : {len(dropped):>10,}  ({len(dropped)/n_q2*100:.1f}% of {LABEL_Q2})")
+    print(f"    New             : {len(new):>10,}  ({len(new)/n_q4*100:.1f}% of {LABEL_Q4})")
 
     # Tag rows
     q2 = q2.merge(
