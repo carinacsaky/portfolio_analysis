@@ -1,23 +1,21 @@
 """
 U2 — Temporal Accumulation Analysis
 
-NOTE: building_footprints_partition (version_uid="test_4") is synthetic test data.
-The real portfolio table is bldngs_ftprnts_ww_prt (version_uid="manual_import").
-With only one populated quarter in bldngs_ftprnts_ww_prt (2025_Q4), true temporal
-analysis is not yet possible there. This script runs against building_footprints_partition
-to validate the temporal pipeline and methodology for when real multi-quarter data arrives.
+Real portfolio tables: bldngs_ftprnts_ww_prt_2025_Q3 and bldngs_ftprnts_ww_prt_2025_Q4.
+ITA (Italy) is the only country present in both quarters and is used as the deep-dive.
+Q3 contains ITA only; Q4 contains 54 countries.
 
-Two populated snapshots: 2025_Q2 and 2025_Q4.
-CUB (Cuba) is the only country present in both quarters.
+Italy TSI halved from 9,308 B EUR (Q3) to 4,657 B EUR (Q4) — this is likely a data
+process change rather than real attrition and should be investigated.
 
 Outputs (all in output/):
-  u2_portfolio_overview.png    — portfolio size Q2 vs Q4
-  u2_entry_exit.csv            — country entry/exit table
-  u2_cuba_decomposition.csv    — per-peril ΔTSI breakdown
-  u2_cuba_decomposition.png    — waterfall chart
-  u2_cuba_tsi_distribution.png — TSI histograms Q2 vs Q4
-  u2_cuba_concentration.png    — HHI Q2 vs Q4
-  u2_cuba_geographic.html      — interactive map: persisted / new / dropped
+  u2_portfolio_overview.png   — portfolio size Q3 vs Q4
+  u2_entry_exit.csv           — country entry/exit table
+  u2_ita_decomposition.csv    — per-peril ΔTSI breakdown
+  u2_ita_decomposition.png    — waterfall chart
+  u2_ita_tsi_distribution.png — TSI histograms Q3 vs Q4
+  u2_ita_concentration.png    — HHI Q3 vs Q4
+  u2_ita_geographic.html      — interactive map: persisted / new / dropped
 """
 
 import os
@@ -49,10 +47,13 @@ _DB = (
 )
 _CONN = dict(keepalives=1, keepalives_idle=5, keepalives_interval=2, keepalives_count=5)
 
-PART_Q2 = "building_footprints_partition_2025_Q2"
-PART_Q4 = "building_footprints_partition_2025_Q4"
-COLS    = "lat, lng, covered_peril, insured_value_gross, insured_value_net"
-PERILS  = ["FLOOD", "FIRE", "EARTHQUAKE"]
+PART_Q2     = "bldngs_ftprnts_ww_prt_2025_Q3"   # earlier quarter
+PART_Q4     = "bldngs_ftprnts_ww_prt_2025_Q4"   # later quarter
+LABEL_Q2    = "Q3 2025"
+LABEL_Q4    = "Q4 2025"
+DEEP_DIVE   = "ITA"
+COLS        = "lat, lng, covered_peril, insured_value_gross, insured_value_net"
+PERILS      = ["FLOOD", "FIRE", "EARTHQUAKE"]
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -83,16 +84,23 @@ def section1(eng):
     """
     q2 = pd.read_sql(q2_sql, eng)
 
+    # Approximate Q4 row count via pg_class (avoids full scan on large table)
+    q4_approx = pd.read_sql(text(
+        "SELECT reltuples::bigint AS n FROM pg_class WHERE relname = :t"
+    ), eng, params={"t": PART_Q4})["n"].iloc[0]
+    q4_countries = pd.read_sql(
+        text(f'SELECT COUNT(DISTINCT country) AS n FROM "{PART_Q4}"'), eng
+    )["n"].iloc[0]
+
     q2_by_country = q2.groupby("country").agg(
         rows=("n", "sum"), tsi_gross=("tsi_gross", "sum")
     ).reset_index()
 
-    print(f"  Q2: {q2['n'].sum():>12,.0f} rows | "
-          f"TSI {q2['tsi_gross'].sum()/1e12:.3f} T EUR | "
+    print(f"  {LABEL_Q2}: {q2['n'].sum():>12,.0f} rows | "
+          f"TSI {q2['tsi_gross'].sum()/1e9:.1f} B EUR | "
           f"{q2['country'].nunique()} countries")
-    print(f"  Q4: {1_716_231_337:>12,} rows | ~189 countries "
-          f"[full TSI sum unsupported at this scale]")
-    print(f"\n  Q2 per country:")
+    print(f"  {LABEL_Q4}: {q4_approx:>12,} rows (approx) | {q4_countries} countries")
+    print(f"\n  {LABEL_Q2} per country:")
     for _, r in q2_by_country.iterrows():
         print(f"    {r.country:<6}  {r.rows:>12,.0f} rows  "
               f"TSI {r.tsi_gross/1e9:.1f} B EUR")
@@ -103,21 +111,23 @@ def section1(eng):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     c1, c2 = "#4472C4", "#ED7D31"
 
-    vals_rows = [22_704_825 / 1e6, 1_716_231_337 / 1e6]
-    bars = ax1.bar(["Q2 2025", "Q4 2025"], vals_rows, color=[c1, c2], width=0.45)
+    rows_q2 = q2["n"].sum() / 1e6
+    rows_q4 = q4_approx / 1e6
+    bars = ax1.bar([LABEL_Q2, LABEL_Q4], [rows_q2, rows_q4], color=[c1, c2], width=0.45)
     ax1.set_ylabel("Insured locations (millions)")
     ax1.set_title("Portfolio size")
-    for b, v in zip(bars, vals_rows):
-        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 5,
+    for b, v in zip(bars, [rows_q2, rows_q4]):
+        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.3,
                  f"{v:.0f} M", ha="center", va="bottom", fontsize=9)
 
-    ax2.bar(["Q2 2025", "Q4 2025"], [4, 189], color=[c1, c2], width=0.45)
+    ax2.bar([LABEL_Q2, LABEL_Q4], [q2["country"].nunique(), q4_countries],
+            color=[c1, c2], width=0.45)
     ax2.set_ylabel("Countries")
     ax2.set_title("Geographic coverage")
-    for x, v in [(0, 4), (1, 189)]:
-        ax2.text(x, v + 1, str(v), ha="center", va="bottom", fontsize=9)
+    for x, v in enumerate([q2["country"].nunique(), q4_countries]):
+        ax2.text(x, v + 0.5, str(v), ha="center", va="bottom", fontsize=9)
 
-    plt.suptitle("Portfolio growth Q2 → Q4 2025", fontsize=12)
+    plt.suptitle(f"Portfolio {LABEL_Q2} → {LABEL_Q4}", fontsize=12)
     plt.tight_layout()
     fig.savefig(OUTPUT / "u2_portfolio_overview.png", dpi=150, bbox_inches="tight")
     plt.close()
@@ -128,39 +138,49 @@ def section1(eng):
 
 # ── Section 2: Entry / exit ───────────────────────────────────────────────────
 
-def section2():
+def section2(eng):
     print("\n── Section 2: Country Entry / Exit ────────────────────────────")
 
-    ee = pd.DataFrame([
-        dict(country="DEU", q2_rows=17_374_482, q4_rows=0,
-             status="Q2 only — exited or not yet reloaded in Q4"),
-        dict(country="CUB", q2_rows=3_000_000,  q4_rows=8_100_000,
-             status="Both quarters — temporal overlap"),
-        dict(country="CHE", q2_rows=1_458_344,  q4_rows=0,
-             status="Q2 only — exited or not yet reloaded in Q4"),
-        dict(country="JAM", q2_rows=871_999,    q4_rows=0,
-             status="Q2 only — exited or not yet reloaded in Q4"),
-        dict(country="~185 others", q2_rows=0, q4_rows=1_708_131_337,
-             status="Q4 only — entered portfolio"),
-    ])
+    q2_countries = set(pd.read_sql(
+        text(f'SELECT DISTINCT country FROM "{PART_Q2}"'), eng
+    )["country"].tolist())
+    q4_countries = set(pd.read_sql(
+        text(f'SELECT DISTINCT country FROM "{PART_Q4}"'), eng
+    )["country"].tolist())
 
-    print(ee.to_string(index=False))
+    both    = sorted(q2_countries & q4_countries)
+    q2_only = sorted(q2_countries - q4_countries)
+    q4_only = sorted(q4_countries - q2_countries)
+
+    print(f"  {LABEL_Q2} countries : {len(q2_countries)}  ({sorted(q2_countries)})")
+    print(f"  {LABEL_Q4} countries : {len(q4_countries)}")
+    print(f"  In both quarters  : {len(both)}  → {both}  (valid for temporal analysis)")
+    print(f"  {LABEL_Q2} only     : {len(q2_only)}  → {q2_only}")
+    print(f"  {LABEL_Q4} only     : {len(q4_only)}")
+
+    rows = (
+        [dict(country=c, status="both quarters") for c in both]
+        + [dict(country=c, status=f"{LABEL_Q2} only") for c in q2_only]
+        + [dict(country=c, status=f"{LABEL_Q4} only — newly onboarded") for c in q4_only]
+    )
+    ee = pd.DataFrame(rows)
     ee.to_csv(OUTPUT / "u2_entry_exit.csv", index=False)
+    print("  → u2_entry_exit.csv")
     return ee
 
 
 # ── Section 3: Cuba deep-dive ─────────────────────────────────────────────────
 
 def section3(eng):
-    print("\n── Section 3: Cuba Temporal Deep-Dive ─────────────────────────")
+    print(f"\n── Section 3: {DEEP_DIVE} Temporal Deep-Dive ─────────────────────────")
 
-    print("  Loading CUB Q2 …", end=" ", flush=True)
-    q2 = load_country(eng, PART_Q2, "CUB")
-    print(f"{len(q2):,} rows")
+    print(f"  Loading {DEEP_DIVE} {LABEL_Q2} …", end=" ", flush=True)
+    q2 = load_country(eng, PART_Q2, DEEP_DIVE)
+    print(f"{len(q2):,} rows  |  TSI {q2['insured_value_gross'].sum()/1e9:.1f} B EUR")
 
-    print("  Loading CUB Q4 …", end=" ", flush=True)
-    q4 = load_country(eng, PART_Q4, "CUB")
-    print(f"{len(q4):,} rows")
+    print(f"  Loading {DEEP_DIVE} {LABEL_Q4} …", end=" ", flush=True)
+    q4 = load_country(eng, PART_Q4, DEEP_DIVE)
+    print(f"{len(q4):,} rows  |  TSI {q4['insured_value_gross'].sum()/1e9:.1f} B EUR")
 
     # Flow classification: match on exact (lat, lng, covered_peril)
     # Coordinates are double-precision from the same source system —
@@ -228,11 +248,11 @@ def section3(eng):
             "new_volume_bn", "dropped_volume_bn", "revaluation_bn", "pct_growth"]
     print(f"\n  TSI decomposition (EUR bn):")
     print(decomp[show].to_string(index=False, float_format="{:.2f}".format))
-    decomp.to_csv(OUTPUT / "u2_cuba_decomposition.csv", index=False)
+    decomp.to_csv(OUTPUT / f"u2_{DEEP_DIVE.lower()}_decomposition.csv", index=False)
 
     # Geographic centroid shift (TSI-weighted)
     print(f"\n  TSI-weighted centroid:")
-    for df, label in [(q2, "Q2"), (q4, "Q4")]:
+    for df, label in [(q2, LABEL_Q2), (q4, LABEL_Q4)]:
         w = df["insured_value_gross"]
         print(f"    {label}: lat={np.average(df['lat'], weights=w):.5f}  "
               f"lng={np.average(df['lng'], weights=w):.5f}")
@@ -313,11 +333,11 @@ def section4(q2, q4, decomp):
                     color="grey", linewidth=0.7, linestyle="--")
             prev_top += steps[i][1]
 
-    plt.suptitle("Cuba: TSI decomposition Q2 → Q4  (EUR bn)", fontsize=12)
+    plt.suptitle(f"{DEEP_DIVE}: TSI decomposition {LABEL_Q2} → {LABEL_Q4}  (EUR bn)", fontsize=12)
     plt.tight_layout()
-    fig.savefig(OUTPUT / "u2_cuba_decomposition.png", dpi=150, bbox_inches="tight")
+    fig.savefig(OUTPUT / f"u2_{DEEP_DIVE.lower()}_decomposition.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print("  → u2_cuba_decomposition.png")
+    print(f"  → u2_{DEEP_DIVE.lower()}_decomposition.png")
 
     # 4b: TSI distribution comparison
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
@@ -325,17 +345,17 @@ def section4(q2, q4, decomp):
         v2 = q2[q2["covered_peril"] == peril]["insured_value_gross"] / 1e3
         v4 = q4[q4["covered_peril"] == peril]["insured_value_gross"] / 1e3
         ax.hist(v2.sample(min(40_000, len(v2)), random_state=42),
-                bins=80, alpha=0.55, label="Q2", color="#4472C4", density=True)
+                bins=80, alpha=0.55, label=LABEL_Q2, color="#4472C4", density=True)
         ax.hist(v4.sample(min(40_000, len(v4)), random_state=42),
-                bins=80, alpha=0.55, label="Q4", color="#ED7D31", density=True)
+                bins=80, alpha=0.55, label=LABEL_Q4, color="#ED7D31", density=True)
         ax.set_title(peril)
         ax.set_xlabel("TSI (EUR k)")
         ax.legend(fontsize=8)
-    plt.suptitle("Cuba: TSI distribution Q2 vs Q4  (40k sample)", fontsize=11)
+    plt.suptitle(f"{DEEP_DIVE}: TSI distribution {LABEL_Q2} vs {LABEL_Q4}  (40k sample)", fontsize=11)
     plt.tight_layout()
-    fig.savefig(OUTPUT / "u2_cuba_tsi_distribution.png", dpi=150, bbox_inches="tight")
+    fig.savefig(OUTPUT / f"u2_{DEEP_DIVE.lower()}_tsi_distribution.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print("  → u2_cuba_tsi_distribution.png")
+    print(f"  → u2_{DEEP_DIVE.lower()}_tsi_distribution.png")
 
     # 4c: HHI concentration Q2 vs Q4
     def hhi_grid(df, dim, band=0.5):
@@ -352,19 +372,20 @@ def section4(q2, q4, decomp):
         q2v = [hhi_grid(q2[q2["covered_peril"] == p], dim) for p in PERILS]
         q4v = [hhi_grid(q4[q4["covered_peril"] == p], dim) for p in PERILS]
         x = np.arange(len(PERILS))
-        ax.bar(x - 0.15, q2v, 0.3, label="Q2", color="#4472C4")
-        ax.bar(x + 0.15, q4v, 0.3, label="Q4", color="#ED7D31")
+        ax.bar(x - 0.15, q2v, 0.3, label=LABEL_Q2, color="#4472C4")
+        ax.bar(x + 0.15, q4v, 0.3, label=LABEL_Q4, color="#ED7D31")
         ax.set_xticks(x); ax.set_xticklabels(PERILS)
         ax.set_title(title); ax.set_ylabel("HHI"); ax.legend()
-    plt.suptitle("Cuba: spatial concentration Q2 vs Q4", fontsize=11)
+    plt.suptitle(f"{DEEP_DIVE}: spatial concentration {LABEL_Q2} vs {LABEL_Q4}", fontsize=11)
     plt.tight_layout()
-    fig.savefig(OUTPUT / "u2_cuba_concentration.png", dpi=150, bbox_inches="tight")
+    fig.savefig(OUTPUT / f"u2_{DEEP_DIVE.lower()}_concentration.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print("  → u2_cuba_concentration.png")
+    print(f"  → u2_{DEEP_DIVE.lower()}_concentration.png")
 
     # 4d: Interactive geographic map (FLOOD peril, sampled)
-    flood_q2 = q2[q2["covered_peril"] == "FLOOD"]
-    flood_q4 = q4[q4["covered_peril"] == "FLOOD"]
+    flood_peril = "FLOOD" if "FLOOD" in q2["covered_peril"].unique() else q2["covered_peril"].iloc[0]
+    flood_q2 = q2[q2["covered_peril"] == flood_peril]
+    flood_q4 = q4[q4["covered_peril"] == flood_peril]
     SAMPLE = 8_000
 
     def sample_pts(df, flow_val):
@@ -403,13 +424,13 @@ def section4(q2, q4, decomp):
         <div style="position:fixed;bottom:30px;left:20px;z-index:999;
                     background:white;padding:10px 14px;border-radius:6px;
                     font-size:13px;box-shadow:2px 2px 6px rgba(0,0,0,.3)">
-          <b>Cuba — FLOOD portfolio (8k sample/category)</b><br>
+          <b>{DEEP_DIVE} — {flood_peril} portfolio (8k sample/category)</b><br>
           <span style="color:#4472C4">&#9679;</span> Persisted Q2 → Q4<br>
           <span style="color:#C00000">&#9679;</span> Dropped (Q2 only)<br>
           <span style="color:#70AD47">&#9679;</span> New (Q4 only)
         </div>"""))
-    m.save(str(OUTPUT / "u2_cuba_geographic.html"))
-    print("  → u2_cuba_geographic.html")
+    m.save(str(OUTPUT / f"u2_{DEEP_DIVE.lower()}_geographic.html"))
+    print(f"  → u2_{DEEP_DIVE.lower()}_geographic.html")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -417,7 +438,7 @@ def section4(q2, q4, decomp):
 if __name__ == "__main__":
     eng = make_engine()
     section1(eng)
-    section2()
+    section2(eng)
     q2, q4, decomp = section3(eng)
     section4(q2, q4, decomp)
     print("\nU2 complete. All outputs in output/")
