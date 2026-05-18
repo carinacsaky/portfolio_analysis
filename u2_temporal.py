@@ -107,27 +107,40 @@ def section1(eng):
 
     q2.to_csv(OUTPUT / "u2_q2_summary.csv", index=False)
 
-    # Chart
+    # Query deep-dive country stats from Q4 for a like-for-like comparison
+    dd_q4 = pd.read_sql(text(f"""
+        SELECT COUNT(*) AS n, SUM(insured_value_gross) AS tsi_gross
+        FROM "{PART_Q4}" WHERE country = :c
+    """), eng, params={"c": DEEP_DIVE})
+    dd_q2 = q2_by_country[q2_by_country["country"] == DEEP_DIVE].iloc[0]
+    dd_q4_rows = dd_q4["n"].iloc[0]
+    dd_q4_tsi  = dd_q4["tsi_gross"].iloc[0]
+
+    # Chart — compare deep-dive country only (like-for-like)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     c1, c2 = "#4472C4", "#ED7D31"
 
-    rows_q2 = q2["n"].sum() / 1e6
-    rows_q4 = q4_approx / 1e6
-    bars = ax1.bar([LABEL_Q2, LABEL_Q4], [rows_q2, rows_q4], color=[c1, c2], width=0.45)
+    bars = ax1.bar([LABEL_Q2, LABEL_Q4],
+                   [dd_q2["rows"] / 1e6, dd_q4_rows / 1e6],
+                   color=[c1, c2], width=0.45)
     ax1.set_ylabel("Insured locations (millions)")
-    ax1.set_title("Portfolio size")
-    for b, v in zip(bars, [rows_q2, rows_q4]):
-        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.3,
-                 f"{v:.0f} M", ha="center", va="bottom", fontsize=9)
+    ax1.set_title(f"{DEEP_DIVE} — Locations")
+    for b, v in zip(bars, [dd_q2["rows"] / 1e6, dd_q4_rows / 1e6]):
+        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.05,
+                 f"{v:.1f} M", ha="center", va="bottom", fontsize=9)
 
-    ax2.bar([LABEL_Q2, LABEL_Q4], [q2["country"].nunique(), q4_countries],
-            color=[c1, c2], width=0.45)
-    ax2.set_ylabel("Countries")
-    ax2.set_title("Geographic coverage")
-    for x, v in enumerate([q2["country"].nunique(), q4_countries]):
-        ax2.text(x, v + 0.5, str(v), ha="center", va="bottom", fontsize=9)
+    bars2 = ax2.bar([LABEL_Q2, LABEL_Q4],
+                    [dd_q2["tsi_gross"] / 1e9, dd_q4_tsi / 1e9],
+                    color=[c1, c2], width=0.45)
+    ax2.set_ylabel("Gross TSI (B EUR)")
+    ax2.set_title(f"{DEEP_DIVE} — Gross TSI")
+    for b, v in zip(bars2, [dd_q2["tsi_gross"] / 1e9, dd_q4_tsi / 1e9]):
+        ax2.text(b.get_x() + b.get_width() / 2, b.get_height() + 10,
+                 f"{v:,.0f} B", ha="center", va="bottom", fontsize=9)
 
-    plt.suptitle(f"Portfolio {LABEL_Q2} → {LABEL_Q4}", fontsize=12)
+    plt.suptitle(f"{DEEP_DIVE}: {LABEL_Q2} → {LABEL_Q4}  "
+                 f"(full portfolio: {q2['country'].nunique()} → {q4_countries} countries)",
+                 fontsize=11)
     plt.tight_layout()
     fig.savefig(OUTPUT / "u2_portfolio_overview.png", dpi=150, bbox_inches="tight")
     plt.close()
